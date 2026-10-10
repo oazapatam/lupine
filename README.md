@@ -54,6 +54,22 @@ Inside the client container, `LD_LIBRARY_PATH=/opt/lupine/lib` is already set,
 so CUDA driver users pick up the LUPINE `libcuda.so.1` shim and NVML users such
 as `nvidia-smi` pick up the LUPINE `libnvidia-ml.so.1` shim automatically.
 
+## Windows server
+
+Each release publishes two Windows server packages per CUDA version:
+
+- `lupine-server-windows-cuda-<version>-x86_64-setup.exe`: installer. Puts the
+  server and a tray application under `Program Files`, with optional start at
+  sign-in and a Windows Firewall rule.
+- `lupine-server-windows-cuda-<version>-x86_64.zip`: portable. Unzip anywhere
+  and run `lupine_tray.exe` (tray icon) or `lupine_driver_server.exe` alone.
+
+The tray icon is green while the server runs, grey when stopped and red after
+a crash. Its menu starts, stops and restarts the server, opens the log and
+opens the settings file. Settings and `server.log` live in
+`%LOCALAPPDATA%\Lupine`; `server.ini` sets `Port` (default 14833) and
+`LogLevel`, applied on the next start or restart.
+
 ## Prometheus Metrics
 
 Linux servers built with CUDA and NVML expose Prometheus metrics on the RPC

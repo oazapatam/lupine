@@ -764,6 +764,18 @@ if(LUPINE_BUILD_SERVER)
     endif()
     add_executable(lupine_driver_server ${CMAKE_CURRENT_SOURCE_DIR}/server_main.cpp)
     target_link_libraries(lupine_driver_server PRIVATE lupine_server_runtime)
+    if(WIN32)
+        # Notification-area supervisor that the Windows installer ships beside
+        # the server; see deploy/windows/lupine_tray.cpp.
+        add_executable(lupine_server_tray WIN32
+            ${CMAKE_CURRENT_SOURCE_DIR}/deploy/windows/lupine_tray.cpp)
+        target_compile_definitions(lupine_server_tray PRIVATE
+            UNICODE _UNICODE NOMINMAX)
+        target_link_libraries(lupine_server_tray PRIVATE shell32 ole32 user32
+            gdi32 advapi32)
+        set_target_properties(lupine_server_tray PROPERTIES
+            OUTPUT_NAME lupine_tray)
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_library(lupine_server SHARED)
         target_link_libraries(lupine_server PRIVATE lupine_server_runtime)

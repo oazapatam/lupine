@@ -108,7 +108,7 @@ jobs:
             "-DLUPINE_CLIENT_BUNDLE_INPUT=$PWD\client-libs"
 
       - name: Build
-        run: cmake --build build/windows-server --config Release --target lupine_driver_server lupine_cuda_smemcpy --parallel
+        run: cmake --build build/windows-server --config Release --target lupine_driver_server lupine_server_tray lupine_cuda_smemcpy --parallel
 
       - name: Verify the executable is self-contained
         shell: pwsh
@@ -128,21 +128,51 @@ jobs:
             throw "executable depends on DLLs the artifact does not ship: $bad"
           }
 
-      - name: Collect artifact
+      - name: Collect portable artifact
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Portable layout: unzip anywhere and run lupine_tray.exe for the
+          # tray icon, or lupine_driver_server.exe alone for a console server.
           $out = 'artifacts/lupine-server-windows-cuda-${{ matrix.cuda }}-x86_64'
           $archive = "$out.zip"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          Copy-Item 'build/windows-server/Release/lupine_driver_server.exe' "$out/lupine_driver_server.exe"
-          Get-FileHash "$out/lupine_driver_server.exe" -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLowerInvariant())  lupine_driver_server.exe" } |
-            Set-Content "$out/SHA256SUMS"
+          foreach ($exe in 'lupine_driver_server.exe', 'lupine_tray.exe') {
+            Copy-Item "build/windows-server/Release/$exe" "$out/$exe"
+          }
+          Get-ChildItem $out -Filter *.exe |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            } | Set-Content "$out/SHA256SUMS"
           if (Test-Path $archive) {
             Remove-Item $archive -Force
           }
           Compress-Archive -Path "$out/*" -DestinationPath $archive
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install innosetup --no-progress -y
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $stage = 'installer-stage'
+          New-Item -ItemType Directory -Force -Path $stage, artifacts | Out-Null
+          Copy-Item 'build/windows-server/Release/lupine_driver_server.exe' $stage
+          Copy-Item 'build/windows-server/Release/lupine_tray.exe' $stage
+          $tag = '${{ github.event.release.tag_name }}'
+          $version = if ($tag) { $tag.TrimStart('v') } else { '0.0.0' }
+          & $iscc "/DAppVersion=$version" "/DCudaVersion=${{ matrix.cuda }}" `
+            "/DSourceDir=$PWD\$stage" "/DOutputDir=$PWDrtifacts" `
+            deploy/windows/lupine-server.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: lupine-server-windows-cuda-${{ matrix.cuda }}-x86_64-setup
+          path: artifacts/lupine-server-windows-cuda-${{ matrix.cuda }}-x86_64-setup.exe
+          if-no-files-found: error
 
       - name: Upload server executable
         uses: actions/upload-artifact@v7
@@ -161,5 +191,6 @@ jobs:
           gh release upload `
             '${{ github.event.release.tag_name }}' `
             'artifacts/lupine-server-windows-cuda-${{ matrix.cuda }}-x86_64.zip' `
+            'artifacts/lupine-server-windows-cuda-${{ matrix.cuda }}-x86_64-setup.exe' `
             --repo '${{ github.repository }}' `
             --clobber
