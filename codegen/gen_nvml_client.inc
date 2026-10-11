@@ -22,6 +22,10 @@ extern "C" nvmlReturn_t nvmlSystemGetDriverVersion(char *version,
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   conn_t *conn = connection();
+  if (conn == nullptr && local_ready()) {
+    return call_local(&nvmlSystemGetDriverVersion, "nvmlSystemGetDriverVersion",
+                      version, length);
+  }
   return lupine_rpc_nvmlSystemGetDriverVersion(conn, version, length);
 }
 
@@ -47,6 +51,10 @@ extern "C" nvmlReturn_t nvmlSystemGetNVMLVersion(char *version,
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   conn_t *conn = connection();
+  if (conn == nullptr && local_ready()) {
+    return call_local(&nvmlSystemGetNVMLVersion, "nvmlSystemGetNVMLVersion",
+                      version, length);
+  }
   return lupine_rpc_nvmlSystemGetNVMLVersion(conn, version, length);
 }
 
@@ -69,6 +77,10 @@ extern "C" nvmlReturn_t nvmlSystemGetCudaDriverVersion(int *cudaDriverVersion) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   conn_t *conn = connection();
+  if (conn == nullptr && local_ready()) {
+    return call_local(&nvmlSystemGetCudaDriverVersion,
+                      "nvmlSystemGetCudaDriverVersion", cudaDriverVersion);
+  }
   return lupine_rpc_nvmlSystemGetCudaDriverVersion(conn, cudaDriverVersion);
 }
 
@@ -93,6 +105,10 @@ nvmlSystemGetCudaDriverVersion_v2(int *cudaDriverVersion) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   conn_t *conn = connection();
+  if (conn == nullptr && local_ready()) {
+    return call_local(&nvmlSystemGetCudaDriverVersion_v2,
+                      "nvmlSystemGetCudaDriverVersion_v2", cudaDriverVersion);
+  }
   return lupine_rpc_nvmlSystemGetCudaDriverVersion_v2(conn, cudaDriverVersion);
 }
 
@@ -118,7 +134,12 @@ extern "C" nvmlReturn_t nvmlDeviceGetHandleByUUID(const char *uuid,
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   return lookup_device_on_all_connections(
-      device, [&](conn_t *conn, nvmlDevice_t *remote_device) {
+      device,
+      [&](nvmlDevice_t *local_device) {
+        return call_local(&nvmlDeviceGetHandleByUUID,
+                          "nvmlDeviceGetHandleByUUID", uuid, local_device);
+      },
+      [&](conn_t *conn, nvmlDevice_t *remote_device) {
         return lupine_rpc_nvmlDeviceGetHandleByUUID(conn, uuid, remote_device);
       });
 }
@@ -147,7 +168,13 @@ extern "C" nvmlReturn_t nvmlDeviceGetHandleByPciBusId_v2(const char *pciBusId,
     return NVML_ERROR_INVALID_ARGUMENT;
   }
   return lookup_device_on_all_connections(
-      device, [&](conn_t *conn, nvmlDevice_t *remote_device) {
+      device,
+      [&](nvmlDevice_t *local_device) {
+        return call_local(&nvmlDeviceGetHandleByPciBusId_v2,
+                          "nvmlDeviceGetHandleByPciBusId_v2", pciBusId,
+                          local_device);
+      },
+      [&](conn_t *conn, nvmlDevice_t *remote_device) {
         return lupine_rpc_nvmlDeviceGetHandleByPciBusId_v2(conn, pciBusId,
                                                            remote_device);
       });
@@ -176,6 +203,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetUUID(nvmlDevice_t device, char *uuid,
   if ((length * sizeof(char) != 0 && uuid == nullptr)) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetUUID, "nvmlDeviceGetUUID", device, uuid,
+                      length);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetUUID(conn, device, uuid, length);
 }
@@ -199,6 +230,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetMinorNumber(nvmlDevice_t device,
                                                  unsigned int *minorNumber) {
   if (minorNumber == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMinorNumber, "nvmlDeviceGetMinorNumber",
+                      device, minorNumber);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMinorNumber(conn, device, minorNumber);
@@ -224,6 +259,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetPciInfo_v3(nvmlDevice_t device,
   if (pci == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetPciInfo_v3, "nvmlDeviceGetPciInfo_v3",
+                      device, pci);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetPciInfo_v3(conn, device, pci);
 }
@@ -247,6 +286,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device,
                                                 nvmlMemory_t *memory) {
   if (memory == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMemoryInfo, "nvmlDeviceGetMemoryInfo",
+                      device, memory);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMemoryInfo(conn, device, memory);
@@ -272,6 +315,10 @@ nvmlDeviceGetUtilizationRates(nvmlDevice_t device,
                               nvmlUtilization_t *utilization) {
   if (utilization == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetUtilizationRates,
+                      "nvmlDeviceGetUtilizationRates", device, utilization);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetUtilizationRates(conn, device, utilization);
@@ -301,6 +348,10 @@ nvmlDeviceGetTemperature(nvmlDevice_t device,
   if (temp == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetTemperature, "nvmlDeviceGetTemperature",
+                      device, sensorType, temp);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetTemperature(conn, device, sensorType, temp);
 }
@@ -324,6 +375,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetPowerUsage(nvmlDevice_t device,
                                                 unsigned int *power) {
   if (power == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetPowerUsage, "nvmlDeviceGetPowerUsage",
+                      device, power);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetPowerUsage(conn, device, power);
@@ -349,6 +404,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetPowerManagementLimit(nvmlDevice_t device,
                                                           unsigned int *limit) {
   if (limit == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetPowerManagementLimit,
+                      "nvmlDeviceGetPowerManagementLimit", device, limit);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetPowerManagementLimit(conn, device, limit);
@@ -377,6 +436,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetClockInfo(nvmlDevice_t device,
   if (clock == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetClockInfo, "nvmlDeviceGetClockInfo", device,
+                      type, clock);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetClockInfo(conn, device, type, clock);
 }
@@ -404,6 +467,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetMaxClockInfo(nvmlDevice_t device,
   if (clock == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMaxClockInfo, "nvmlDeviceGetMaxClockInfo",
+                      device, type, clock);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMaxClockInfo(conn, device, type, clock);
 }
@@ -427,6 +494,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetPerformanceState(nvmlDevice_t device,
                                                       nvmlPstates_t *pState) {
   if (pState == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetPerformanceState,
+                      "nvmlDeviceGetPerformanceState", device, pState);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetPerformanceState(conn, device, pState);
@@ -452,6 +523,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetComputeMode(nvmlDevice_t device,
   if (mode == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetComputeMode, "nvmlDeviceGetComputeMode",
+                      device, mode);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetComputeMode(conn, device, mode);
 }
@@ -475,6 +550,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetPersistenceMode(nvmlDevice_t device,
                                                      nvmlEnableState_t *mode) {
   if (mode == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetPersistenceMode,
+                      "nvmlDeviceGetPersistenceMode", device, mode);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetPersistenceMode(conn, device, mode);
@@ -500,6 +579,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetFanSpeed(nvmlDevice_t device,
   if (speed == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetFanSpeed, "nvmlDeviceGetFanSpeed", device,
+                      speed);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetFanSpeed(conn, device, speed);
 }
@@ -523,6 +606,9 @@ extern "C" nvmlReturn_t nvmlDeviceGetBrand(nvmlDevice_t device,
                                            nvmlBrandType_t *type) {
   if (type == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetBrand, "nvmlDeviceGetBrand", device, type);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetBrand(conn, device, type);
@@ -552,6 +638,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetVbiosVersion(nvmlDevice_t device,
   if ((length * sizeof(char) != 0 && version == nullptr)) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetVbiosVersion, "nvmlDeviceGetVbiosVersion",
+                      device, version, length);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetVbiosVersion(conn, device, version, length);
 }
@@ -578,6 +668,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetSerial(nvmlDevice_t device, char *serial,
                                             unsigned int length) {
   if ((length * sizeof(char) != 0 && serial == nullptr)) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetSerial, "nvmlDeviceGetSerial", device,
+                      serial, length);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetSerial(conn, device, serial, length);
@@ -606,6 +700,11 @@ extern "C" nvmlReturn_t nvmlDeviceGetBoardPartNumber(nvmlDevice_t device,
   if ((length * sizeof(char) != 0 && partNumber == nullptr)) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetBoardPartNumber,
+                      "nvmlDeviceGetBoardPartNumber", device, partNumber,
+                      length);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetBoardPartNumber(conn, device, partNumber,
                                                  length);
@@ -631,6 +730,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetDisplayMode(nvmlDevice_t device,
   if (display == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetDisplayMode, "nvmlDeviceGetDisplayMode",
+                      device, display);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetDisplayMode(conn, device, display);
 }
@@ -654,6 +757,10 @@ extern "C" nvmlReturn_t
 nvmlDeviceGetDisplayActive(nvmlDevice_t device, nvmlEnableState_t *isActive) {
   if (isActive == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetDisplayActive, "nvmlDeviceGetDisplayActive",
+                      device, isActive);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetDisplayActive(conn, device, isActive);
@@ -679,6 +786,11 @@ nvmlDeviceGetCurrPcieLinkGeneration(nvmlDevice_t device,
                                     unsigned int *currLinkGen) {
   if (currLinkGen == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetCurrPcieLinkGeneration,
+                      "nvmlDeviceGetCurrPcieLinkGeneration", device,
+                      currLinkGen);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetCurrPcieLinkGeneration(conn, device,
@@ -706,6 +818,10 @@ nvmlDeviceGetCurrPcieLinkWidth(nvmlDevice_t device,
   if (currLinkWidth == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetCurrPcieLinkWidth,
+                      "nvmlDeviceGetCurrPcieLinkWidth", device, currLinkWidth);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetCurrPcieLinkWidth(conn, device, currLinkWidth);
 }
@@ -732,6 +848,10 @@ nvmlDeviceGetMaxPcieLinkGeneration(nvmlDevice_t device,
   if (maxLinkGen == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMaxPcieLinkGeneration,
+                      "nvmlDeviceGetMaxPcieLinkGeneration", device, maxLinkGen);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMaxPcieLinkGeneration(conn, device,
                                                        maxLinkGen);
@@ -756,6 +876,10 @@ extern "C" nvmlReturn_t
 nvmlDeviceGetMaxPcieLinkWidth(nvmlDevice_t device, unsigned int *maxLinkWidth) {
   if (maxLinkWidth == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMaxPcieLinkWidth,
+                      "nvmlDeviceGetMaxPcieLinkWidth", device, maxLinkWidth);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMaxPcieLinkWidth(conn, device, maxLinkWidth);
@@ -784,6 +908,10 @@ nvmlDeviceGetPcieThroughput(nvmlDevice_t device, nvmlPcieUtilCounter_t counter,
   if (value == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetPcieThroughput,
+                      "nvmlDeviceGetPcieThroughput", device, counter, value);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetPcieThroughput(conn, device, counter, value);
 }
@@ -808,6 +936,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetPcieReplayCounter(nvmlDevice_t device,
   if (value == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetPcieReplayCounter,
+                      "nvmlDeviceGetPcieReplayCounter", device, value);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetPcieReplayCounter(conn, device, value);
 }
@@ -831,6 +963,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetMaxMigDeviceCount(nvmlDevice_t device,
                                                        unsigned int *count) {
   if (count == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMaxMigDeviceCount,
+                      "nvmlDeviceGetMaxMigDeviceCount", device, count);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMaxMigDeviceCount(conn, device, count);
@@ -859,6 +995,11 @@ extern "C" nvmlReturn_t nvmlDeviceGetTotalEccErrors(
   if (eccCounts == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetTotalEccErrors,
+                      "nvmlDeviceGetTotalEccErrors", device, errorType,
+                      counterType, eccCounts);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetTotalEccErrors(conn, device, errorType,
                                                 counterType, eccCounts);
@@ -886,6 +1027,11 @@ extern "C" nvmlReturn_t nvmlDeviceGetDetailedEccErrors(
     nvmlEccCounterType_t counterType, nvmlEccErrorCounts_t *eccCounts) {
   if (eccCounts == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetDetailedEccErrors,
+                      "nvmlDeviceGetDetailedEccErrors", device, errorType,
+                      counterType, eccCounts);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetDetailedEccErrors(conn, device, errorType,
@@ -918,6 +1064,11 @@ extern "C" nvmlReturn_t nvmlDeviceGetMemoryErrorCounter(
   if (count == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMemoryErrorCounter,
+                      "nvmlDeviceGetMemoryErrorCounter", device, errorType,
+                      counterType, locationType, count);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMemoryErrorCounter(
       conn, device, errorType, counterType, locationType, count);
@@ -946,6 +1097,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetEccMode(nvmlDevice_t device,
   if (current == nullptr || pending == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetEccMode, "nvmlDeviceGetEccMode", device,
+                      current, pending);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetEccMode(conn, device, current, pending);
 }
@@ -972,6 +1127,10 @@ nvmlDeviceGetTemperatureV(nvmlDevice_t device,
   if (temperature == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetTemperatureV, "nvmlDeviceGetTemperatureV",
+                      device, temperature);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetTemperatureV(conn, device, temperature);
 }
@@ -995,6 +1154,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetEnforcedPowerLimit(nvmlDevice_t device,
                                                         unsigned int *limit) {
   if (limit == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetEnforcedPowerLimit,
+                      "nvmlDeviceGetEnforcedPowerLimit", device, limit);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetEnforcedPowerLimit(conn, device, limit);
@@ -1020,6 +1183,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device,
                                                    nvmlMemory_v2_t *memory) {
   if (memory == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMemoryInfo_v2, "nvmlDeviceGetMemoryInfo_v2",
+                      device, memory);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMemoryInfo_v2(conn, device, memory);
@@ -1048,6 +1215,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetMigMode(nvmlDevice_t device,
   if (currentMode == nullptr || pendingMode == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMigMode, "nvmlDeviceGetMigMode", device,
+                      currentMode, pendingMode);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetMigMode(conn, device, currentMode,
                                          pendingMode);
@@ -1074,6 +1245,10 @@ nvmlDeviceGetVirtualizationMode(nvmlDevice_t device,
   if (pVirtualMode == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetVirtualizationMode,
+                      "nvmlDeviceGetVirtualizationMode", device, pVirtualMode);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetVirtualizationMode(conn, device, pVirtualMode);
 }
@@ -1097,6 +1272,10 @@ extern "C" nvmlReturn_t nvmlDeviceIsMigDeviceHandle(nvmlDevice_t device,
                                                     unsigned int *isMigDevice) {
   if (isMigDevice == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceIsMigDeviceHandle,
+                      "nvmlDeviceIsMigDeviceHandle", device, isMigDevice);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceIsMigDeviceHandle(conn, device, isMigDevice);
@@ -1126,6 +1305,11 @@ extern "C" nvmlReturn_t nvmlDeviceGetNvLinkRemoteDeviceType(
   if (pNvLinkDeviceType == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
   }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetNvLinkRemoteDeviceType,
+                      "nvmlDeviceGetNvLinkRemoteDeviceType", device, link,
+                      pNvLinkDeviceType);
+  }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetNvLinkRemoteDeviceType(conn, device, link,
                                                         pNvLinkDeviceType);
@@ -1152,6 +1336,10 @@ nvmlDeviceGetNvLinkRemotePciInfo_v2(nvmlDevice_t device, unsigned int link,
                                     nvmlPciInfo_t *pci) {
   if (pci == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetNvLinkRemotePciInfo_v2,
+                      "nvmlDeviceGetNvLinkRemotePciInfo_v2", device, link, pci);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetNvLinkRemotePciInfo_v2(conn, device, link,
@@ -1180,6 +1368,11 @@ extern "C" nvmlReturn_t nvmlDeviceGetCudaComputeCapability(nvmlDevice_t device,
                                                            int *minor) {
   if (major == nullptr || minor == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetCudaComputeCapability,
+                      "nvmlDeviceGetCudaComputeCapability", device, major,
+                      minor);
   }
   conn_t *conn = connection_for_device(&device);
   return lupine_rpc_nvmlDeviceGetCudaComputeCapability(conn, device, major,

@@ -766,6 +766,10 @@ static void *lupine_local_libcuda_handle() {
 #ifdef __linux__
     lupine_native_cuda_call_guard native_call;
 #endif
+    const char *local_gpus = getenv("LUPINE_LOCAL_GPUS");
+    if (local_gpus != nullptr && strcmp(local_gpus, "0") == 0) {
+      return; // Only the servers' GPUs.
+    }
     const char *override_path = getenv("LUPINE_REAL_LIBCUDA");
 #if defined(_WIN32)
     if (override_path != nullptr && override_path[0] != '\0') {
@@ -819,6 +823,152 @@ extern "C" void *lupine_real_cuda_symbol(const char *name) {
   return lupine_real_dlsym(handle, name);
 }
 
+// With no server to send it to, a function LUPINE does not forward still
+// works on this machine's GPUs: the local driver answers it, as if LUPINE were
+// not there. Beside a server it stays a stub, since the driver would be handed
+// the server's handles.
+static bool lupine_local_driver_answers_missing() {
+  return lupine_local_cuda_available() && rpc_open() < 0;
+}
+
+// OpenGL, EGL and VDPAU interop only works with a GPU of this machine, which
+// owns the display's objects, so LUPINE forwards none of it. Those entry
+// points go straight to the local driver, so programs that use them beside the
+// remote GPUs (video decode in browsers, Blender, OBS) keep working.
+static bool lupine_is_interop_symbol(const char *symbol) {
+  static const char *const prefixes[] = {
+      "cuGL",
+      "cuEGL",
+      "cuVDPAU",
+      "cuGraphicsGL",
+      "cuGraphicsEGL",
+      "cuGraphicsVDPAU",
+      "cuGraphicsResourceGetMappedEglFrame",
+      "cuEventCreateFromEGLSync",
+  };
+  if (symbol == nullptr) {
+    return false;
+  }
+  for (const char *prefix : prefixes) {
+    if (strncmp(symbol, prefix, strlen(prefix)) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+// The driver's interop exports, for programs that look them up in this
+// library or link against them. Each one jumps through a slot that holds the
+// local driver's entry point once this library loads.
+#define LUPINE_INTEROP_SYMBOLS(X)                                              \
+  X(cuEGLApiInit)                                                              \
+  X(cuEGLStreamConsumerAcquireFrame)                                           \
+  X(cuEGLStreamConsumerConnect)                                                \
+  X(cuEGLStreamConsumerConnectWithFlags)                                       \
+  X(cuEGLStreamConsumerDisconnect)                                             \
+  X(cuEGLStreamConsumerReleaseFrame)                                           \
+  X(cuEGLStreamProducerConnect)                                                \
+  X(cuEGLStreamProducerDisconnect)                                             \
+  X(cuEGLStreamProducerPresentFrame)                                           \
+  X(cuEGLStreamProducerReturnFrame)                                            \
+  X(cuGLCtxCreate)                                                             \
+  X(cuGLCtxCreate_v2)                                                          \
+  X(cuGLGetDevices)                                                            \
+  X(cuGLGetDevices_v2)                                                         \
+  X(cuGLInit)                                                                  \
+  X(cuGLMapBufferObject)                                                       \
+  X(cuGLMapBufferObjectAsync)                                                  \
+  X(cuGLMapBufferObjectAsync_v2)                                               \
+  X(cuGLMapBufferObjectAsync_v2_ptsz)                                          \
+  X(cuGLMapBufferObject_v2)                                                    \
+  X(cuGLMapBufferObject_v2_ptds)                                               \
+  X(cuGLRegisterBufferObject)                                                  \
+  X(cuGLSetBufferObjectMapFlags)                                               \
+  X(cuGLUnmapBufferObject)                                                     \
+  X(cuGLUnmapBufferObjectAsync)                                                \
+  X(cuGLUnregisterBufferObject)                                                \
+  X(cuGraphicsEGLRegisterImage)                                                \
+  X(cuGraphicsGLRegisterBuffer)                                                \
+  X(cuGraphicsGLRegisterImage)                                                 \
+  X(cuGraphicsResourceGetMappedEglFrame)                                       \
+  X(cuGraphicsVDPAURegisterOutputSurface)                                      \
+  X(cuGraphicsVDPAURegisterVideoSurface)                                       \
+  X(cuVDPAUCtxCreate)                                                          \
+  X(cuVDPAUCtxCreate_v2)                                                       \
+  X(cuVDPAUGetDevice)
+
+extern "C" CUresult lupine_interop_not_supported() {
+  return CUDA_ERROR_NOT_SUPPORTED;
+}
+
+#define LUPINE_INTEROP_SLOT(name)                                              \
+  __attribute__((visibility("hidden"))) void *lupine_interop_slot_##name =     \
+      reinterpret_cast<void *>(&lupine_interop_not_supported);
+extern "C" {
+LUPINE_INTEROP_SYMBOLS(LUPINE_INTEROP_SLOT)
+}
+#undef LUPINE_INTEROP_SLOT
+
+#if defined(__x86_64__)
+#if defined(__CET__)
+#define LUPINE_INTEROP_LANDING "endbr64\n"
+#else
+#define LUPINE_INTEROP_LANDING ""
+#endif
+#define LUPINE_INTEROP_JUMP(name) "jmp *lupine_interop_slot_" #name "(%rip)\n"
+#else
+#if defined(__ARM_FEATURE_BTI_DEFAULT)
+#define LUPINE_INTEROP_LANDING "hint #34\n"
+#else
+#define LUPINE_INTEROP_LANDING ""
+#endif
+#define LUPINE_INTEROP_JUMP(name)                                              \
+  "adrp x16, lupine_interop_slot_" #name "\n"                                  \
+  "ldr x16, [x16, :lo12:lupine_interop_slot_" #name "]\n"                      \
+  "br x16\n"
+#endif
+#define LUPINE_INTEROP_ENTRY(name)                                             \
+  asm(".text\n"                                                                \
+      ".globl " #name "\n"                                                     \
+      ".type " #name ", @function\n" #name                                     \
+      ":\n" LUPINE_INTEROP_LANDING LUPINE_INTEROP_JUMP(name) ".size " #name    \
+                                                             ", .-" #name      \
+                                                             "\n");
+LUPINE_INTEROP_SYMBOLS(LUPINE_INTEROP_ENTRY)
+#undef LUPINE_INTEROP_ENTRY
+
+__attribute__((constructor)) static void lupine_bind_interop_entry_points() {
+#define LUPINE_INTEROP_BIND(name)                                              \
+  if (void *real = lupine_real_cuda_symbol(#name)) {                           \
+    lupine_interop_slot_##name = real;                                         \
+  }
+  LUPINE_INTEROP_SYMBOLS(LUPINE_INTEROP_BIND)
+#undef LUPINE_INTEROP_BIND
+}
+#endif
+
+// This machine's NVML, which the LUPINE NVML client loads, finds this library
+// under the libcuda.so.1 name. What it asks belongs to the local driver: a
+// server's tables would be wrong for it, and building the device table would
+// dial the servers and wake the GPU for a version number.
+static bool lupine_called_by_local_nvml(void *caller) {
+#if defined(__GLIBC__)
+  Dl_info info = {};
+  if (!lupine_local_cuda_available() || dladdr(caller, &info) == 0 ||
+      info.dli_fname == nullptr) {
+    return false;
+  }
+  const char *base = strrchr(info.dli_fname, '/');
+  base = base == nullptr ? info.dli_fname : base + 1;
+  // LUPINE's own NVML client never calls into CUDA, so this is the host's.
+  return strncmp(base, "libnvidia-ml.so", 15) == 0;
+#else
+  (void)caller;
+  return false;
+#endif
+}
+
 // Client-answered entry points must fail with NOT_INITIALIZED until cuInit;
 // forwarded ones get the server's own state.
 static std::atomic<bool> lupine_cuda_initialized{false};
@@ -867,6 +1017,9 @@ lupine_loading_mode_cache() {
 }
 
 extern "C" CUresult cuDriverGetVersion(int *driverVersion) {
+  if (lupine_called_by_local_nvml(__builtin_return_address(0))) {
+    return lupine_call_real_cuda_fn("cuDriverGetVersion", driverVersion);
+  }
   lupine_route route = lupine_route_for_default();
   if (lupine_route_is_local(route)) {
     return lupine_call_real_cuda_fn("cuDriverGetVersion", driverVersion);
@@ -8697,6 +8850,10 @@ extern "C" CUresult cuGetExportTable(const void **ppExportTable,
     LUPINE_TRACE_LOG("LUPINE cuGetExportTable requested UUID: "
                      << lupine_uuid_hex(pExportTableId));
   }
+  if (lupine_called_by_local_nvml(__builtin_return_address(0))) {
+    return lupine_call_real_cuda_fn("cuGetExportTable", ppExportTable,
+                                    pExportTableId);
+  }
 
   if (ppExportTable != nullptr) {
     *ppExportTable = nullptr;
@@ -9549,6 +9706,23 @@ CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion,
     return CUDA_SUCCESS;
   }
 
+  if (lupine_is_interop_symbol(symbol) ||
+      lupine_local_driver_answers_missing()) {
+    void *real = nullptr;
+    CUdriverProcAddressQueryResult real_status =
+        CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+    if (lupine_call_real_cuda_fn("cuGetProcAddress_v2", symbol, &real,
+                                 cudaVersion, flags,
+                                 &real_status) == CUDA_SUCCESS &&
+        real_status == CU_GET_PROC_ADDRESS_SUCCESS && real != nullptr) {
+      *pfn = real;
+      if (symbolStatus != nullptr) {
+        *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
+      }
+      return CUDA_SUCCESS;
+    }
+  }
+
   void *unsupported_stub = lupine_get_unsupported_stub(symbol);
   if (unsupported_stub != nullptr) {
     *pfn = unsupported_stub;
@@ -9705,6 +9879,12 @@ void *dlsym(void *handle, const char *name) noexcept {
   auto manual_it = manual_function_map.find(name);
   if (manual_it != manual_function_map.end()) {
     return manual_it->second;
+  }
+
+  if (lupine_is_interop_symbol(name) || lupine_local_driver_answers_missing()) {
+    if (void *real = lupine_real_cuda_symbol(name)) {
+      return real;
+    }
   }
 
   void *unsupported_stub = lupine_get_unsupported_stub(name);

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- A GPU die on its package, with the tray's "running" green. -->
+  <g fill="#8b949e">
+    <rect x="17" y="3" width="4" height="8" rx="1"/>
+    <rect x="30" y="3" width="4" height="8" rx="1"/>
+    <rect x="43" y="3" width="4" height="8" rx="1"/>
+    <rect x="17" y="53" width="4" height="8" rx="1"/>
+    <rect x="30" y="53" width="4" height="8" rx="1"/>
+    <rect x="43" y="53" width="4" height="8" rx="1"/>
+    <rect x="3" y="17" width="8" height="4" rx="1"/>
+    <rect x="3" y="30" width="8" height="4" rx="1"/>
+    <rect x="3" y="43" width="8" height="4" rx="1"/>
+    <rect x="53" y="17" width="8" height="4" rx="1"/>
+    <rect x="53" y="30" width="8" height="4" rx="1"/>
+    <rect x="53" y="43" width="8" height="4" rx="1"/>
+  </g>
+  <rect x="9" y="9" width="46" height="46" rx="7" fill="#24292f"/>
+  <rect x="17" y="17" width="30" height="30" rx="4" fill="#2ea043"/>
+  <path d="M27 24v16h11" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

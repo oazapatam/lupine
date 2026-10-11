@@ -74,6 +74,11 @@ and substitutes the remote handle before marshalling the request. Device lookup
 APIs without an input handle use `@routingkey ALL` together with
 `@recordowner NVML_DEVICE <output>` to search every server and translate the
 returned remote handle back to the client's virtual device handle.
+The NVML client also lists the host's own GPUs when it finds the host's NVML
+(unless `LUPINE_LOCAL_GPUS=0`): a wrapper given one of their handles skips the
+server and calls the host library's entry point of the same name through
+`call_local`, the `ALL` lookups try the host library first, and with no
+server the wrappers that name no device answer from the host library too.
 
 Inverse CUDA device lookups use `@routingkey ALL <output>`. The generated
 client tries each local and remote route, then translates the successful

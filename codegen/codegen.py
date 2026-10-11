@@ -415,6 +415,7 @@ NVML = Backend(
     device_routing_kind="NVML_DEVICE",
     symbol_lookup="nvml_symbol",
     lookup_on_all_connections=True,
+    local_devices=True,
 )
 
 HIP = Backend(

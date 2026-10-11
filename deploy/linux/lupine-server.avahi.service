@@ -1,0 +1,18 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  Optional mDNS announcement for a LUPINE server. Clients find servers on
+  their own network without it; announcing helps on networks too large to
+  sweep. On the GPU host:
+
+    sudo cp lupine-server.avahi.service /etc/avahi/services/lupine.service
+
+  Change the port if the server does not listen on 14833.
+-->
+<service-group>
+  <name replace-wildcards="yes">LUPINE on %h</name>
+  <service>
+    <type>_lupine._tcp</type>
+    <port>14833</port>
+  </service>
+</service-group>

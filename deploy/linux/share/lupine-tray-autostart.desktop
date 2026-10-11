@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=LUPINE Client
+Comment=Remote GPU servers in the system tray
+Exec=@BINDIR@/lupine-tray
+Icon=lupine
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

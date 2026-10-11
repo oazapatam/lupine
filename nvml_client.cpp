@@ -16,6 +16,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef _WIN32
+#include <dlfcn.h>
+#endif
+
 #include "codegen/gen_rpc_ids.h"
 #include "lupine_log.h"
 #include "rpc.h"
@@ -41,6 +45,8 @@ struct lupine_nvml_remote_device {
   unsigned int remote_index = 0;
   nvmlDevice_t remote_device = nullptr;
   std::string server_label;
+  // A GPU of this machine: remote_device is the host NVML's own handle.
+  bool local = false;
 };
 
 std::vector<lupine_nvml_remote_device> devices;
@@ -52,6 +58,134 @@ std::mutex devices_mutex;
 std::atomic<int> init_refcount{0};
 
 thread_local bool init_gate_bypass = false;
+
+// This machine's own NVML, found where the driver installs it or at
+// LUPINE_REAL_LIBNVML, the way the CUDA client finds libcuda. Its GPUs are
+// listed ahead of the servers', and calls on them go to it rather than a
+// server; with no server it answers everything. LUPINE_LOCAL_GPUS=0 leaves
+// it out.
+void *open_local_library(const char *path) {
+#ifdef _WIN32
+  HMODULE module = LoadLibraryA(path);
+  void *init =
+      module == nullptr
+          ? nullptr
+          : reinterpret_cast<void *>(GetProcAddress(module, "nvmlInit_v2"));
+  void *handle = reinterpret_cast<void *>(module);
+#else
+  int flags = RTLD_NOW | RTLD_LOCAL;
+#ifdef RTLD_DEEPBIND
+  // Keep the host library's calls to its own entry points off this shim.
+  flags |= RTLD_DEEPBIND;
+#endif
+  void *handle = dlopen(path, flags);
+  void *init = handle == nullptr ? nullptr : dlsym(handle, "nvmlInit_v2");
+#endif
+  // This shim itself would loop every call back into it.
+  if (init == nullptr || init == reinterpret_cast<void *>(&nvmlInit_v2)) {
+    return nullptr;
+  }
+  return handle;
+}
+
+void *local_library() {
+  static void *library = []() -> void * {
+    const char *enabled = getenv("LUPINE_LOCAL_GPUS");
+    if (enabled != nullptr && strcmp(enabled, "0") == 0) {
+      return nullptr;
+    }
+    const char *path = getenv("LUPINE_REAL_LIBNVML");
+    if (path != nullptr && path[0] != '\0') {
+      void *handle = open_local_library(path);
+      if (handle == nullptr) {
+        LUPINE_LOG_ERROR(
+            "LUPINE_REAL_LIBNVML=" << path << " is not this machine's NVML");
+      }
+      return handle;
+    }
+#ifdef _WIN32
+    char system_directory[MAX_PATH + 1] = {};
+    UINT length = GetSystemDirectoryA(system_directory, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+      return nullptr;
+    }
+    return open_local_library(
+        (std::string(system_directory, length) + "\\nvml.dll").c_str());
+#else
+    for (const char *candidate : {
+             "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1",
+             "/usr/lib/aarch64-linux-gnu/libnvidia-ml.so.1",
+             "/usr/lib64/libnvidia-ml.so.1",
+             "/usr/lib/wsl/lib/libnvidia-ml.so.1",
+         }) {
+      if (void *handle = open_local_library(candidate)) {
+        return handle;
+      }
+    }
+    return nullptr;
+#endif
+  }();
+  return library;
+}
+
+void *local_symbol(const char *name) {
+  void *library = local_library();
+  if (library == nullptr) {
+    return nullptr;
+  }
+#ifdef _WIN32
+  return reinterpret_cast<void *>(
+      GetProcAddress(static_cast<HMODULE>(library), name));
+#else
+  return dlsym(library, name);
+#endif
+}
+
+// Successful inits of the host library still to be matched by a shutdown.
+std::atomic<int> local_inits{0};
+
+bool local_ready() { return local_inits.load(std::memory_order_acquire) > 0; }
+
+bool local_init(const char *name, unsigned int flags, bool with_flags) {
+  nvmlReturn_t result = NVML_ERROR_LIBRARY_NOT_FOUND;
+  if (with_flags) {
+    auto entry =
+        reinterpret_cast<nvmlReturn_t (*)(unsigned int)>(local_symbol(name));
+    if (entry != nullptr) {
+      result = entry(flags);
+    }
+  } else {
+    auto entry = reinterpret_cast<nvmlReturn_t (*)(void)>(local_symbol(name));
+    if (entry != nullptr) {
+      result = entry();
+    }
+  }
+  if (result == NVML_SUCCESS) {
+    local_inits.fetch_add(1, std::memory_order_acq_rel);
+    return true;
+  }
+  if (local_library() != nullptr) {
+    LUPINE_LOG_DEBUG("This machine's NVML failed to initialize ("
+                     << result << "); listing only the servers' GPUs");
+  }
+  return false;
+}
+
+void local_shutdown() {
+  int previous = local_inits.load(std::memory_order_acquire);
+  do {
+    if (previous <= 0) {
+      return;
+    }
+  } while (!local_inits.compare_exchange_weak(previous, previous - 1,
+                                              std::memory_order_acq_rel,
+                                              std::memory_order_acquire));
+  auto entry =
+      reinterpret_cast<nvmlReturn_t (*)(void)>(local_symbol("nvmlShutdown"));
+  if (entry != nullptr) {
+    entry();
+  }
+}
 
 bool nvml_initialized() {
   return init_gate_bypass || init_refcount.load(std::memory_order_acquire) > 0;
@@ -85,7 +219,8 @@ const lupine_client_transport_config &nvml_transport_config() {
     lupine_client_transport_config config;
     config.dial_policy = lupine_client_dial_policy::single_attempt;
     config.strict_endpoints = true;
-    config.log_missing_server = true;
+    // With no server, this machine's GPUs still answer.
+    config.log_missing_server = local_library() == nullptr;
     config.dispatch = nvml_transport_dispatch;
     config.connection_kind = "nvml";
     return config;
@@ -141,6 +276,30 @@ lupine_nvml_remote_device *mapped_device(nvmlDevice_t device) {
   return &devices[(value - begin) / sizeof(lupine_nvml_remote_device)];
 }
 
+bool is_local_device(nvmlDevice_t device) {
+  auto *mapped = mapped_device(device);
+  return mapped != nullptr && mapped->local;
+}
+
+template <typename T> T local_argument(T value) { return value; }
+
+nvmlDevice_t local_argument(nvmlDevice_t device) {
+  auto *mapped = mapped_device(device);
+  return mapped != nullptr && mapped->local ? mapped->remote_device : device;
+}
+
+// Calls the host library's `name`, which has the signature of `entry`, with
+// this shim's handles of local GPUs replaced by the host library's.
+template <typename... Params, typename... Args>
+nvmlReturn_t call_local(nvmlReturn_t (*entry)(Params...), const char *name,
+                        Args... args) {
+  auto local = reinterpret_cast<decltype(entry)>(local_symbol(name));
+  if (local == nullptr) {
+    return NVML_ERROR_FUNCTION_NOT_FOUND;
+  }
+  return local(local_argument(args)...);
+}
+
 nvmlReturn_t call_no_args_on(conn_t *c, int op) {
   nvmlReturn_t result = rpc_error();
   if (c == nullptr || rpc_write_start_request(c, op) < 0 ||
@@ -182,7 +341,7 @@ nvmlReturn_t call_device_from_index_on(conn_t *c, int op, unsigned int index,
 }
 
 nvmlReturn_t ensure_devices() {
-  if (!nvml_initialized() || open_connection() < 0) {
+  if (!nvml_initialized() || (open_connection() < 0 && !local_ready())) {
     return rpc_error();
   }
   std::lock_guard<std::mutex> lock(devices_mutex);
@@ -191,6 +350,24 @@ nvmlReturn_t ensure_devices() {
   }
 
   devices.clear();
+  if (local_inits.load(std::memory_order_acquire) > 0) {
+    auto get_count = reinterpret_cast<nvmlReturn_t (*)(unsigned int *)>(
+        local_symbol("nvmlDeviceGetCount_v2"));
+    auto get_handle =
+        reinterpret_cast<nvmlReturn_t (*)(unsigned int, nvmlDevice_t *)>(
+            local_symbol("nvmlDeviceGetHandleByIndex_v2"));
+    unsigned int count = 0;
+    if (get_count != nullptr && get_handle != nullptr &&
+        get_count(&count) == NVML_SUCCESS) {
+      for (unsigned int ordinal = 0; ordinal < count; ++ordinal) {
+        nvmlDevice_t local = nullptr;
+        if (get_handle(ordinal, &local) == NVML_SUCCESS) {
+          devices.push_back(
+              lupine_nvml_remote_device{0, ordinal, local, "", true});
+        }
+      }
+    }
+  }
   unsigned int connection_count = lupine_client_transport_size();
   for (unsigned int i = 0; i < connection_count; ++i) {
     conn_t *conn = lupine_client_transport_connection(i);
@@ -219,8 +396,9 @@ nvmlReturn_t ensure_devices() {
   return NVML_SUCCESS;
 }
 
-template <typename Lookup>
+template <typename LocalLookup, typename Lookup>
 nvmlReturn_t lookup_device_on_all_connections(nvmlDevice_t *device,
+                                              LocalLookup &&local_lookup,
                                               Lookup &&lookup) {
   if (device == nullptr) {
     return NVML_ERROR_INVALID_ARGUMENT;
@@ -229,6 +407,20 @@ nvmlReturn_t lookup_device_on_all_connections(nvmlDevice_t *device,
   nvmlReturn_t result = ensure_devices();
   if (result != NVML_SUCCESS) {
     return result;
+  }
+
+  if (local_inits.load(std::memory_order_acquire) > 0) {
+    nvmlDevice_t local = nullptr;
+    if (local_lookup(&local) == NVML_SUCCESS) {
+      auto mapped = std::find_if(
+          devices.begin(), devices.end(), [&](const auto &candidate) {
+            return candidate.local && candidate.remote_device == local;
+          });
+      if (mapped != devices.end()) {
+        *device = reinterpret_cast<nvmlDevice_t>(&*mapped);
+        return NVML_SUCCESS;
+      }
+    }
   }
 
   nvmlReturn_t first_error = NVML_ERROR_NOT_FOUND;
@@ -246,7 +438,8 @@ nvmlReturn_t lookup_device_on_all_connections(nvmlDevice_t *device,
 
     auto mapped = std::find_if(
         devices.begin(), devices.end(), [&](const auto &candidate) {
-          return candidate.conn_index == i && candidate.remote_device == remote;
+          return !candidate.local && candidate.conn_index == i &&
+                 candidate.remote_device == remote;
         });
     if (mapped == devices.end()) {
       // The server returned a handle that was not part of the device table
@@ -274,6 +467,10 @@ conn_t *connection_for_device(nvmlDevice_t *device) {
   auto *mapped = mapped_device(*device);
   if (mapped == nullptr) {
     return connection();
+  }
+  if (mapped->local) {
+    // Never hand a server a handle of this machine's NVML.
+    return nullptr;
   }
   *device = mapped->remote_device;
   return connection(mapped->conn_index);
@@ -322,6 +519,9 @@ nvmlReturn_t call_processes(int op, nvmlDevice_t device,
 
 nvmlReturn_t call_event_set_create(nvmlEventSet_t *set) {
   conn_t *c = connection();
+  if (c == nullptr && local_ready()) {
+    return call_local(&nvmlEventSetCreate, "nvmlEventSetCreate", set);
+  }
   nvmlReturn_t result = rpc_error();
   nvmlEventSet_t temp = nullptr;
   if (c == nullptr || rpc_write_start_request(c, RPC_nvmlEventSetCreate) < 0 ||
@@ -337,6 +537,9 @@ nvmlReturn_t call_event_set_create(nvmlEventSet_t *set) {
 
 nvmlReturn_t call_event_set_free(nvmlEventSet_t set) {
   conn_t *c = connection();
+  if (c == nullptr && local_ready()) {
+    return call_local(&nvmlEventSetFree, "nvmlEventSetFree", set);
+  }
   nvmlReturn_t result = rpc_error();
   if (c == nullptr || rpc_write_start_request(c, RPC_nvmlEventSetFree) < 0 ||
       rpc_write(c, &set, sizeof(set)) < 0 || rpc_wait_for_response(c) < 0 ||
@@ -349,6 +552,10 @@ nvmlReturn_t call_event_set_free(nvmlEventSet_t set) {
 nvmlReturn_t call_event_set_wait(nvmlEventSet_t set, nvmlEventData_t *data,
                                  unsigned int timeoutms) {
   conn_t *c = connection();
+  if (c == nullptr && local_ready()) {
+    return call_local(&nvmlEventSetWait_v2, "nvmlEventSetWait_v2", set, data,
+                      timeoutms);
+  }
   nvmlReturn_t result = rpc_error();
   nvmlEventData_t temp = {};
   if (c == nullptr || rpc_write_start_request(c, RPC_nvmlEventSetWait_v2) < 0 ||
@@ -367,6 +574,14 @@ nvmlReturn_t call_event_set_wait(nvmlEventSet_t set, nvmlEventData_t *data,
 nvmlReturn_t call_device_register_events(nvmlDevice_t device,
                                          unsigned long long eventTypes,
                                          nvmlEventSet_t set) {
+  if (is_local_device(device)) {
+    // Event sets live on the first server when there is one.
+    if (connection() != nullptr) {
+      return NVML_ERROR_NOT_SUPPORTED;
+    }
+    return call_local(&nvmlDeviceRegisterEvents, "nvmlDeviceRegisterEvents",
+                      device, eventTypes, set);
+  }
   conn_t *c = connection_for_device(&device);
   nvmlReturn_t result = rpc_error();
   if (c == nullptr ||
@@ -426,7 +641,11 @@ extern "C" nvmlReturn_t nvmlSystemGetNVMLVersion(char *version,
 
 extern "C" nvmlReturn_t nvmlInit_v2(void) {
   init_refcount.fetch_add(1, std::memory_order_acq_rel);
+  bool local = local_init("nvmlInit_v2", 0, false);
   if (open_connection() < 0) {
+    if (local) {
+      return NVML_SUCCESS;
+    }
     init_refcount.fetch_sub(1, std::memory_order_acq_rel);
     return NVML_ERROR_UNKNOWN;
   }
@@ -446,7 +665,11 @@ extern "C" nvmlReturn_t nvmlInit(void) { return nvmlInit_v2(); }
 
 extern "C" nvmlReturn_t nvmlInitWithFlags(unsigned int flags) {
   init_refcount.fetch_add(1, std::memory_order_acq_rel);
+  bool local = local_init("nvmlInitWithFlags", flags, true);
   if (open_connection() < 0) {
+    if (local) {
+      return NVML_SUCCESS;
+    }
     init_refcount.fetch_sub(1, std::memory_order_acq_rel);
     return NVML_ERROR_UNKNOWN;
   }
@@ -480,8 +703,15 @@ extern "C" nvmlReturn_t nvmlShutdown(void) {
                                                 std::memory_order_acq_rel,
                                                 std::memory_order_acquire));
   bool last = previous == 1;
+  local_shutdown();
 
   if (lupine_client_transport_size() == 0) {
+    if (last) {
+      // Running on this machine's GPUs alone; their handles end here.
+      std::lock_guard<std::mutex> lock(devices_mutex);
+      devices_ready = false;
+      devices.clear();
+    }
     return NVML_SUCCESS;
   }
   unsigned int count = lupine_client_transport_size();
@@ -646,6 +876,10 @@ extern "C" nvmlReturn_t nvmlDeviceGetHandleByPciBusId(const char *pciBusId,
 
 extern "C" nvmlReturn_t nvmlDeviceGetName(nvmlDevice_t device, char *name,
                                           unsigned int length) {
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetName, "nvmlDeviceGetName", device, name,
+                      length);
+  }
   nvmlReturn_t result =
       call_device_string(RPC_nvmlDeviceGetName, device, name, length);
   if (result != NVML_SUCCESS || name == nullptr || length == 0) {
@@ -700,36 +934,66 @@ extern "C" nvmlReturn_t nvmlDeviceGetPciInfo(nvmlDevice_t device,
 
 extern "C" nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetComputeRunningProcesses,
+                      "nvmlDeviceGetComputeRunningProcesses", device, infoCount,
+                      infos);
+  }
   return call_processes(RPC_nvmlDeviceGetComputeRunningProcesses, device,
                         infoCount, infos);
 }
 
 extern "C" nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetComputeRunningProcesses_v2,
+                      "nvmlDeviceGetComputeRunningProcesses_v2", device,
+                      infoCount, infos);
+  }
   return call_processes(RPC_nvmlDeviceGetComputeRunningProcesses_v2, device,
                         infoCount, infos);
 }
 
 extern "C" nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetGraphicsRunningProcesses,
+                      "nvmlDeviceGetGraphicsRunningProcesses", device,
+                      infoCount, infos);
+  }
   return call_processes(RPC_nvmlDeviceGetGraphicsRunningProcesses, device,
                         infoCount, infos);
 }
 
 extern "C" nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetGraphicsRunningProcesses_v2,
+                      "nvmlDeviceGetGraphicsRunningProcesses_v2", device,
+                      infoCount, infos);
+  }
   return call_processes(RPC_nvmlDeviceGetGraphicsRunningProcesses_v2, device,
                         infoCount, infos);
 }
 
 extern "C" nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMPSComputeRunningProcesses,
+                      "nvmlDeviceGetMPSComputeRunningProcesses", device,
+                      infoCount, infos);
+  }
   return call_processes(RPC_nvmlDeviceGetMPSComputeRunningProcesses, device,
                         infoCount, infos);
 }
 
 extern "C" nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v2(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  if (is_local_device(device)) {
+    return call_local(&nvmlDeviceGetMPSComputeRunningProcesses_v2,
+                      "nvmlDeviceGetMPSComputeRunningProcesses_v2", device,
+                      infoCount, infos);
+  }
   return call_processes(RPC_nvmlDeviceGetMPSComputeRunningProcesses_v2, device,
                         infoCount, infos);
 }

@@ -1,0 +1,83 @@
+name: Build Linux Client Packages
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+on:
+  release:
+    types: [published]
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Linux client tray and installers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-pyqt6 python3-pytest qt6-svg-plugins
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: /usr/bin/python3 -m pytest deploy/linux/tests -q
+
+      - name: Build packages
+        run: |
+          set -euo pipefail
+          # Packages are architecture independent: the native client comes
+          # from the server at run time.
+          tag='${{ github.event.release.tag_name }}'
+          deploy/linux/build-packages.sh ${tag:+--version "$tag"} --out artifacts
+
+      - name: Check the Debian package
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y ./artifacts/lupine-client_*_all.deb
+          lupine-run --help >/dev/null
+          QT_QPA_PLATFORM=offscreen /usr/bin/python3 -c \
+            "import sys; sys.path.insert(0, '/usr/lib/lupine-client'); import lupine_desktop.tray"
+          test -f /etc/xdg/autostart/lupine-tray.desktop
+          test -f /usr/share/icons/hicolor/scalable/status/lupine-tray-ok.svg
+          sudo apt-get remove -y lupine-client
+
+      - name: Check the portable installer
+        run: |
+          set -euo pipefail
+          tar -xzf artifacts/lupine-client-*-linux.tar.gz -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP"/lupine-client-*-linux/install.sh --user --no-deps
+          ~/.local/bin/lupine-run --help >/dev/null
+          ~/.local/lib/lupine-client/uninstall.sh
+          test ! -e ~/.local/bin/lupine-run
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: lupine-client-linux
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload \
+            '${{ github.event.release.tag_name }}' \
+            artifacts/lupine-client_*_all.deb \
+            artifacts/lupine-client-*-linux.tar.gz \
+            --repo '${{ github.repository }}' \
+            --clobber

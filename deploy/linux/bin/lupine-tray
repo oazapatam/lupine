@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+installed = root / "lib" / "lupine-client"
+# The installed layout, or deploy/linux in a checkout with python/ beside it.
+paths = [installed] if installed.is_dir() else [root, root.parent.parent / "python"]
+sys.path[:0] = [str(path) for path in paths]
+
+from lupine_desktop.tray import main
+
+sys.exit(main())

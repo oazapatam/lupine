@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -21,6 +22,9 @@ namespace {
 constexpr unsigned int kTransportCapacity = 16;
 constexpr unsigned int kBoundedRetryCount = 5;
 constexpr const char *kDefaultPort = "14833";
+// A server the tray selected may simply be off; programs must not wait long
+// for it before carrying on with this machine's GPUs.
+constexpr int kSelectionConnectTimeoutMs = 1500;
 
 struct client_transport_state {
   lupine_client_transport_config config;
@@ -32,11 +36,40 @@ struct client_transport_state {
   std::array<std::thread, kTransportCapacity> checkpoint_threads;
   unsigned int count = 0;
   bool shutting_down = false;
+  // Dialing the tray's selection rather than LUPINE_SERVER, and whether that
+  // reached no server, which this process then stops asking for.
+  bool selection = false;
+  bool selection_failed = false;
 };
 
 client_transport_state &transport() {
   static auto *state = new client_transport_state;
   return *state;
+}
+
+// Without LUPINE_SERVER, the servers the LUPINE tray selected: it keeps them in
+// $XDG_RUNTIME_DIR/lupine/servers, comma or line separated, while it runs.
+bool read_tray_selection(std::string *servers) {
+  const char *runtime = getenv("XDG_RUNTIME_DIR");
+  if (runtime == nullptr || runtime[0] == '\0') {
+    return false;
+  }
+  std::ifstream file(std::string(runtime) + "/lupine/servers");
+  std::string line;
+  servers->clear();
+  while (std::getline(file, line)) {
+    const char *blank = " \t\r";
+    size_t begin = line.find_first_not_of(blank);
+    if (begin == std::string::npos || line[begin] == '#') {
+      continue;
+    }
+    size_t end = line.find_last_not_of(blank);
+    if (!servers->empty()) {
+      *servers += ',';
+    }
+    *servers += line.substr(begin, end - begin + 1);
+  }
+  return !servers->empty();
 }
 
 bool endpoint_has_invalid_scheme(const std::string &endpoint) {
@@ -364,10 +397,17 @@ int connect_endpoint(client_transport_state &state,
           ? kBoundedRetryCount
           : 0;
   lupine_socket_t connfd =
-      lupine_tcp_connect(endpoint.host.c_str(), endpoint.port.c_str(), retries);
+      lupine_tcp_connect(endpoint.host.c_str(), endpoint.port.c_str(), retries,
+                         state.selection ? kSelectionConnectTimeoutMs : 0);
   if (connfd == LUPINE_INVALID_SOCKET) {
-    LUPINE_LOG_ERROR("Connecting to " << endpoint.host << " port "
-                                      << endpoint.port << " failed");
+    if (state.selection) {
+      LUPINE_LOG_DEBUG("Connecting to "
+                       << endpoint.host << " port " << endpoint.port
+                       << " failed; using this machine's GPUs");
+    } else {
+      LUPINE_LOG_ERROR("Connecting to " << endpoint.host << " port "
+                                        << endpoint.port << " failed");
+    }
     return -1;
   }
   if (rpc_conn_init(conn, connfd, 0) < 0) {
@@ -410,11 +450,22 @@ int connect_endpoint(client_transport_state &state,
       // A refusal means either this slot is taken or the whole window was
       // wrong. The response carries the peer's window, so adopt it and start
       // over from its first slot; otherwise step to the next slot in the window
-      // both ends already agree on.
+      // both ends already agree on. A peer that states no window (a Windows or
+      // macOS server) hosts no arena at all, so retry without one, the way
+      // clients on those platforms always connect.
       lupine_va_window stated = {};
-      bool adopt = rpc_http2_peer_va_window(conn, &stated) &&
+      bool hosts_arenas = rpc_http2_peer_va_window(conn, &stated);
+      bool adopt = hosts_arenas &&
                    (stated.base != window.base || stated.size != window.size);
       lupine_va_release(conn);
+      if (!hosts_arenas) {
+        LUPINE_LOG_DEBUG("LUPINE server at " << endpoint.host << " port "
+                                             << endpoint.port
+                                             << " hosts no arenas; "
+                                                "retrying without one");
+        window = {};
+        continue;
+      }
       if (adopt) {
         LUPINE_LOG_DEBUG("LUPINE server at " << endpoint.host << " port "
                                              << endpoint.port
@@ -575,8 +626,17 @@ int lupine_client_transport_open(const lupine_client_transport_config &config,
     pthread_mutex_unlock(&state.mutex);
     return 0;
   }
+  if (state.selection_failed) {
+    pthread_mutex_unlock(&state.mutex);
+    return -1;
+  }
   if (servers == nullptr) {
     servers = getenv("LUPINE_SERVER");
+  }
+  std::string selection;
+  bool from_selection = servers == nullptr && read_tray_selection(&selection);
+  if (from_selection) {
+    servers = selection.c_str();
   }
   if (servers == nullptr) {
     if (config.log_missing_server) {
@@ -592,6 +652,12 @@ int lupine_client_transport_open(const lupine_client_transport_config &config,
     return -1;
   }
   state.config = config;
+  state.selection = from_selection;
+  if (from_selection) {
+    // Unlike an explicit LUPINE_SERVER, the selection is everyone's default:
+    // dial it once, briefly, and leave the program its local GPUs otherwise.
+    state.config.dial_policy = lupine_client_dial_policy::single_attempt;
+  }
   for (const auto &endpoint : endpoints) {
     if (state.count == kTransportCapacity) {
       LUPINE_LOG_ERROR("Too many LUPINE_SERVER entries; ignoring the rest");
@@ -602,6 +668,7 @@ int lupine_client_transport_open(const lupine_client_transport_config &config,
     }
   }
   int result = state.count == 0 ? -1 : 0;
+  state.selection_failed = from_selection && state.count == 0;
   pthread_mutex_unlock(&state.mutex);
   return result;
 }

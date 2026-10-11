@@ -70,6 +70,74 @@ opens the settings file. Settings and `server.log` live in
 `%LOCALAPPDATA%\Lupine`; `server.ini` sets `Port` (default 14833) and
 `LogLevel`, applied on the next start or restart.
 
+## Linux client
+
+Each release also publishes the Linux client with a system tray icon:
+
+- `lupine-client_<version>_all.deb`: Debian, Ubuntu and Kubuntu
+  (`sudo apt install ./lupine-client_<version>_all.deb`).
+- `lupine-client-<version>-linux.tar.gz`: any distribution. Extract it and run
+  `./install.sh` (for the current user under `~/.local`, or `--system` for
+  every user under `/usr/local`); it installs PyQt6 and Avahi with the
+  distribution's package manager if they are missing.
+
+You don't need to know the server's address. The tray scans the local
+network for LUPINE servers when it starts and every five minutes afterwards.
+It tries every host on each local IPv4 network (a network larger than /22 is
+reduced to the /24 around the machine), the hosts in the neighbour table,
+`_lupine._tcp` mDNS services and online Tailscale peers. A host counts as a
+server only if `GET /` on port 14833 answers `lupine`. `/metrics`, when the
+server provides it, supplies the GPU names, memory and load. For a selected
+server without `/metrics` (the Windows server), the tray asks the server's NVML
+through the client instead, once a minute. It also marks any GPU that NVML
+lists but the server's CUDA driver does not enumerate. If no server is
+selected yet, the tray picks the one with the most GPUs and free memory.
+The icon is a GPU package that Plasma draws in the panel's colors, like its
+own tray icons; its die is green while the selected servers answer, grey
+when none is selected and red when one stops answering. It works in KDE
+Plasma and in any other desktop that hosts StatusNotifierItem icons. Clicking the icon
+lists every server. The menu shows the selected server's GPUs, switches
+servers, shows the remote `nvidia-smi`, opens a terminal whose programs use
+the remote GPUs, and controls start at login.
+
+While the tray runs, every program you start sees the selected server's GPUs
+after this machine's, as if they were installed locally: `nvidia-smi`,
+PyTorch and any other CUDA or NVML program, without `lupine-run`. The tray
+adds `$XDG_RUNTIME_DIR/lupine` to the session's `LD_LIBRARY_PATH` (in
+`~/.config/environment.d/61-lupine-gpus.conf`, so it takes effect at the next
+login) and, while the selected server answers, links the client's
+`libcuda.so.1` and `libnvidia-ml.so.1` there and writes the selection to its
+`servers` file, which the client reads when `LUPINE_SERVER` is not set. With
+the tray stopped, no server selected or the server down, the directory is
+empty and programs load the system's driver libraries untouched. A server
+that stops answering before the tray notices costs a program at most 1.5
+seconds before it carries on with the local GPUs. Calls on a local GPU go to
+the local driver, including OpenGL, EGL and VDPAU interop and, with no server,
+anything LUPINE does not forward. *Use remote GPUs in every program* in the
+menu turns this off; while it is on, the tray does not export
+`LUPINE_SERVER`, which would make the client take this machine's own device
+opens for the server's. `LUPINE_LOCAL_GPUS=0` hides this machine's GPUs from
+a program, and `LUPINE_REAL_LIBNVML`, like `LUPINE_REAL_LIBCUDA`, points the
+client at the local driver's library when it is somewhere unusual.
+
+`lupine-run` runs any program against the selected server. It downloads the
+client that server publishes, caches it like the Python package does, and
+puts it first on `LD_LIBRARY_PATH`:
+
+```bash
+lupine-run nvidia-smi
+lupine-run python3 train.py
+lupine-run --discover          # list the servers on the network
+eval "$(lupine-run --env)"     # use them from the current shell
+```
+
+Settings live in `~/.config/lupine/client.json`. `networks` adds subnets to
+scan (useful on networks too large to scan whole), `manual` lists servers to
+always check, and `libdir` points at a local client build for servers that
+publish none. To make a server findable across a large network, copy
+[`deploy/linux/lupine-server.avahi.service`](deploy/linux/lupine-server.avahi.service)
+to `/etc/avahi/services/` on the GPU host.
+
 ## Prometheus Metrics
 
 Linux servers built with CUDA and NVML expose Prometheus metrics on the RPC

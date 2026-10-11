@@ -33,6 +33,12 @@ class Backend:
     # A device named by handle rather than by ordinal has to be looked for on
     # every connection.
     lookup_on_all_connections: bool = False
+    # The client may also list the host's own devices, which its
+    # is_local_device(device) recognizes and call_local(&entry, "name",
+    # args...) serves from the host library instead of a server. With no
+    # server (connection() is null), local_ready() says the host library
+    # answers the calls that name no device.
+    local_devices: bool = False
     # The status a declaration the annotation file says nothing about returns.
     not_supported: str = ""
     # When set, an @async call is submitted fire-and-forget whenever the
@@ -233,8 +239,20 @@ def write_client_wrapper(f, backend: Backend, function, operations, metadata):
         lambda_args = [
             "remote_device" if arg == output_name else arg for arg in call_args
         ]
+        local = ""
+        if backend.local_devices:
+            local_args = [
+                "local_device" if arg == output_name else arg for arg in call_args
+            ]
+            local = (
+                "      [&](nvmlDevice_t *local_device) {\n"
+                f'        return call_local(&{name}, "{name}", '
+                f"{', '.join(local_args)});\n"
+                "      },\n"
+            )
         call = (
             f"lookup_device_on_all_connections({output_name},\n"
+            f"{local}"
             "      [&](conn_t *conn, nvmlDevice_t *remote_device) {\n"
             f"        return lupine_rpc_{name}(conn, {', '.join(lambda_args)});\n"
             "      })"
@@ -243,6 +261,13 @@ def write_client_wrapper(f, backend: Backend, function, operations, metadata):
         if metadata.routing_parameter is None:
             raise RuntimeError(
                 f"{name}: {metadata.routing_kind} routing requires a parameter"
+            )
+        if backend.local_devices:
+            f.write(
+                f"  if (is_local_device({metadata.routing_parameter.name})) {{\n"
+                f'    return call_local(&{name}, "{name}", '
+                f"{', '.join(format_call_args(function))});\n"
+                "  }\n"
             )
         f.write(
             "  conn_t *conn = connection_for_device("
@@ -271,6 +296,13 @@ def write_client_wrapper(f, backend: Backend, function, operations, metadata):
         )
     elif metadata.routing_kind is None:
         f.write("  conn_t *conn = connection();\n")
+        if backend.local_devices:
+            f.write(
+                "  if (conn == nullptr && local_ready()) {\n"
+                f'    return call_local(&{name}, "{name}"'
+                f"{''.join(', ' + arg for arg in format_call_args(function))});\n"
+                "  }\n"
+            )
     else:
         raise RuntimeError(f"{name}: unsupported routing key {metadata.routing_kind}")
     template = metadata.client_call_template

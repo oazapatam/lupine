@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LUPINE Client
+GenericName=Remote GPU client
+Comment=Find LUPINE GPU servers on the network and use their GPUs
+Exec=@BINDIR@/lupine-tray --show
+Icon=lupine
+Terminal=false
+Categories=Utility;System;
+Keywords=GPU;CUDA;remote;network;
+StartupNotify=false
